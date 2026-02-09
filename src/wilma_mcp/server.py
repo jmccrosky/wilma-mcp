@@ -317,6 +317,42 @@ async def send_message(
         return f"API error: {e}"
 
 
+@mcp.tool()
+async def reply_to_message(
+    message_id: str,
+    body: str,
+) -> str:
+    """Reply to a message. This is the preferred way to reply to messages
+    since it handles recipient resolution automatically via Wilma's reply
+    form, without needing to look up recipient IDs separately.
+
+    Args:
+        message_id: ID of the message to reply to (from get_messages)
+        body: Reply message body/content
+
+    Returns:
+        Confirmation message or error.
+    """
+    if not message_id.strip():
+        return "Error: message_id is required"
+    if not body.strip():
+        return "Error: reply body is required"
+
+    try:
+        client = _get_client()
+        success = await client.reply_to_message(
+            message_id=message_id,
+            body=body,
+        )
+        if success:
+            return f"Reply sent successfully to message {message_id}."
+        return "Failed to send reply."
+    except WilmaAuthError as e:
+        return f"Authentication error: {e}"
+    except WilmaAPIError as e:
+        return f"API error: {e}"
+
+
 def main():
     """Run the MCP server."""
     mcp.run()

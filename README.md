@@ -134,7 +134,7 @@ Get list of available message recipients (teachers, staff).
 **Example:** "Who can I send messages to?"
 
 ### `send_message`
-Send a message to a teacher or staff member.
+Send a new message to a teacher or staff member.
 
 **Parameters:**
 - `recipient_id`: ID of the recipient (use `get_recipients` to find IDs)
@@ -143,6 +143,15 @@ Send a message to a teacher or staff member.
 - `reply_to_id` (optional): Message ID if this is a reply
 
 **Example:** "Send a message to teacher 123 about homework"
+
+### `reply_to_message`
+Reply to an existing message. This is the preferred way to reply since it handles recipient resolution automatically via Wilma's reply form, without needing to look up recipient IDs.
+
+**Parameters:**
+- `message_id`: ID of the message to reply to (from `get_messages`)
+- `body`: Reply message body/content
+
+**Example:** "Reply to message 12345 saying I'll attend"
 
 ## Example Conversations
 

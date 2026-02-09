@@ -70,11 +70,16 @@ Read a specific message with full content.
 List available message recipients (teachers, staff) and their IDs.
 
 ### `send_message`
-Send a message to a teacher or staff member.
+Send a new message to a teacher or staff member.
 - `recipient_id` (required): Recipient ID from `get_recipients`
 - `subject` (required): Message subject
 - `body` (required): Message content
 - `reply_to_id` (optional): Message ID if replying
+
+### `reply_to_message`
+Reply to an existing message. This is the preferred way to reply since it handles recipient resolution automatically via Wilma's reply form.
+- `message_id` (required): ID of the message to reply to (from `get_messages`)
+- `body` (required): Reply message content
 
 ## Example Prompts
 
@@ -82,6 +87,7 @@ Send a message to a teacher or staff member.
 - "Show me next week's schedule"
 - "Check my inbox for new messages"
 - "Read message 12345"
+- "Reply to message 12345 saying I'll be there"
 - "Who can I send messages to?"
 - "Send a message to my math teacher about tomorrow's homework"
 - "Do I have any classes on Friday?"
@@ -89,6 +95,7 @@ Send a message to a teacher or staff member.
 
 ## Important Notes
 
-- Always use `get_recipients` before `send_message` to find the correct recipient ID.
+- Use `reply_to_message` to reply to existing messages - it handles recipients automatically.
+- Use `get_recipients` before `send_message` when composing new messages.
 - Wilma has no official API; this uses reverse-engineered web endpoints that may change.
 - Supports Finnish language date inputs: "tänään", "huomenna", "maanantai", etc.
