@@ -769,10 +769,14 @@ class WilmaClient:
         data: dict[str, str] = {"formkey": formkey}
 
         if form:
-            # Collect all hidden inputs (may include rcpt, answer, subject, etc.)
-            for hidden_input in form.find_all("input", {"type": "hidden"}):
-                name = hidden_input.get("name", "")
-                value = hidden_input.get("value", "")
+            # Collect all form inputs (hidden and text) that have pre-filled
+            # values. This includes hidden fields (rcpt, answer, etc.) and
+            # text fields like Subject which Wilma pre-fills for replies.
+            for form_input in form.find_all(
+                "input", {"type": ["hidden", "text"]}
+            ):
+                name = form_input.get("name", "")
+                value = form_input.get("value", "")
                 if name and name != "formkey":
                     data[name] = value
 
