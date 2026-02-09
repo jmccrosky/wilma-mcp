@@ -48,6 +48,27 @@ WILMA_PASSWORD=your_password
 
 > **Security Note**: Never commit your `.env` file to version control.
 
+## Usage with OpenClaw
+
+If you use [OpenClaw](https://openclaw.ai/), this project includes a `SKILL.md` that automatically teaches your agent how to use the Wilma MCP tools.
+
+1. Complete the [Installation](#installation) and [Configuration](#configuration) steps above.
+2. Add the MCP server to your Claude Code settings (`~/.claude.json` or project `.mcp.json`):
+
+```json
+{
+  "mcpServers": {
+    "wilma": {
+      "command": "/path/to/wilma-mcp/venv/bin/python",
+      "args": ["-m", "wilma_mcp.server"],
+      "cwd": "/path/to/wilma-mcp"
+    }
+  }
+}
+```
+
+3. Place or symlink the `SKILL.md` into your OpenClaw skills directory so the agent can discover it.
+
 ## Usage with Claude Desktop
 
 Add the server to your Claude Desktop configuration file:
