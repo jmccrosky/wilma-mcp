@@ -692,15 +692,20 @@ class WilmaClient:
         if "error" in response.text.lower() or "virhe" in response.text.lower():
             raise WilmaAPIError("Failed to send message - server returned an error")
 
-        return True
+        # If we didn't redirect to messages and no explicit error,
+        # something unexpected happened
+        raise WilmaAPIError(
+            "Message may not have been sent - unexpected response from server"
+        )
 
     async def reply_to_message(self, message_id: str, body: str) -> bool:
         """Reply to a message by ID.
 
-        Uses Wilma's reply compose form, which handles recipient resolution
-        server-side based on the original message. This avoids the need to
-        look up recipient IDs separately (which fails when the recipient
-        list is loaded dynamically via JavaScript).
+        Fetches the original message page to find the actual reply link,
+        then follows it to get the reply compose form with pre-filled
+        recipient info. This avoids the need to look up recipient IDs
+        separately (which fails when the recipient list is loaded
+        dynamically via JavaScript).
 
         Args:
             message_id: ID of the message to reply to
@@ -714,9 +719,27 @@ class WilmaClient:
         """
         from bs4 import BeautifulSoup
 
-        # Get the reply compose form - Wilma pre-fills recipient info
-        reply_path = f"/messages/compose?answer={message_id}"
-        compose_response = await self._request("GET", reply_path)
+        # Step 1: Fetch the original message page to find the reply link
+        msg_response = await self._request("GET", f"/messages/{message_id}")
+        msg_soup = BeautifulSoup(msg_response.text, "html.parser")
+
+        # Find the reply link - Wilma uses "Vastaa" (Reply) button
+        reply_link = msg_soup.find("a", string=re.compile(r"Vastaa", re.I))
+        if not reply_link:
+            # Also try finding by href pattern
+            reply_link = msg_soup.find(
+                "a", href=re.compile(r"compose.*(?:answer|reply)", re.I)
+            )
+        if not reply_link or not reply_link.get("href"):
+            raise WilmaAPIError(
+                f"Could not find reply link on message {message_id}"
+            )
+
+        reply_url = reply_link["href"]
+
+        # Step 2: Follow the reply link to get the compose form
+        # The href may already include the user prefix (e.g., /!0411876/...)
+        compose_response = await self._request("GET", reply_url)
         html = compose_response.text
 
         # Extract formkey (CSRF token)
@@ -733,11 +756,15 @@ class WilmaClient:
             )
         formkey = formkey_match.group(1)
 
-        # Parse the form to collect all hidden fields
-        # These may include recipient, subject, and reply reference fields
-        # that Wilma pre-fills for replies
+        # Step 3: Find the compose form specifically (not logout/nav forms)
         soup = BeautifulSoup(html, "html.parser")
-        form = soup.find("form")
+
+        # Find the form that contains a textarea (the message compose form)
+        form = None
+        for candidate in soup.find_all("form"):
+            if candidate.find("textarea"):
+                form = candidate
+                break
 
         data: dict[str, str] = {"formkey": formkey}
 
@@ -758,15 +785,11 @@ class WilmaClient:
         # Set the reply body
         data[body_field] = body
 
-        # Ensure reply reference is included
-        if "answer" not in data and "replyto" not in data:
-            data["answer"] = message_id
-
-        # Determine POST URL from form action, fall back to compose endpoint
+        # Determine POST URL from compose form action
         post_url = "/messages/compose"
         if form and form.get("action"):
             action = form["action"]
-            if action.startswith("/"):
+            if action.startswith("/") and "logout" not in action.lower():
                 post_url = action
 
         response = await self._request(
@@ -784,4 +807,8 @@ class WilmaClient:
         if "error" in response.text.lower() or "virhe" in response.text.lower():
             raise WilmaAPIError("Failed to send reply - server returned an error")
 
-        return True
+        # If we didn't redirect to messages and no explicit error,
+        # something unexpected happened
+        raise WilmaAPIError(
+            "Reply may not have been sent - unexpected response from server"
+        )
