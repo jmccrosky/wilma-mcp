@@ -58,13 +58,17 @@ Get the full week's schedule starting from a given date.
 - `start_date` (optional): Start date of the week, defaults to today
 
 ### `get_messages`
-List messages from a folder.
+List messages from a folder. Each message shows a read/unread indicator (📖 read, 📬 unread).
 - `folder` (optional): "inbox", "sent", or "archive" (default: "inbox")
 - `limit` (optional): Max messages to return (default: 20)
 
 ### `get_message`
-Read a specific message with full content.
+Read a specific message with full content. Note: viewing a message automatically marks it as read on the Wilma server.
 - `message_id` (required): ID of the message to read
+
+### `set_message_read`
+Explicitly mark a message as read. Wilma does not support marking messages as unread — this is a limitation of the platform, not this tool.
+- `message_id` (required): ID of the message to mark as read
 
 ### `get_recipients`
 List available message recipients (teachers, staff) and their IDs.
@@ -95,6 +99,7 @@ Reply to an existing message. This is the preferred way to reply since it handle
 
 ## Important Notes
 
+- **Read/unread status**: Messages show as 📖 (read) or 📬 (unread) in `get_messages`. Viewing a message with `get_message` automatically marks it as read. You can also explicitly mark a message as read with `set_message_read`. Wilma does not support marking messages as unread.
 - Use `reply_to_message` to reply to existing messages - it handles recipients automatically.
 - Use `get_recipients` before `send_message` when composing new messages.
 - Wilma has no official API; this uses reverse-engineered web endpoints that may change.

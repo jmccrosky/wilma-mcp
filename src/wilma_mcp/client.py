@@ -416,12 +416,14 @@ class WilmaClient:
             except ValueError:
                 timestamp = datetime.now()
 
+            # Status field: truthy (e.g. 1) = unread/new, falsy/missing = read
+            # Wilma's frontend uses Status to show bold "Uusi" (New) badge
             message = MessageSummary(
                 id=str(msg.get("Id", "")),
                 subject=msg.get("Subject", ""),
                 sender=msg.get("Sender", ""),
                 timestamp=timestamp,
-                is_read=msg.get("Status", 0) != 0,
+                is_read=not msg.get("Status"),
                 folder=msg.get("Folder", folder),
             )
             messages.append(message)
@@ -511,6 +513,23 @@ class WilmaClient:
             content=content,
             is_read=True,
         )
+
+    async def mark_message_read(self, message_id: str) -> bool:
+        """Mark a message as read by viewing it.
+
+        Wilma marks messages as read when they are viewed (GET request).
+        There is no separate API endpoint for this.
+
+        Args:
+            message_id: Message ID to mark as read
+
+        Returns:
+            True if the request succeeded
+        """
+        path = f"/messages/{message_id}"
+        response = await self._request("GET", path)
+        # A successful page load (not a redirect to login or error) means read
+        return response.status_code == 200
 
     async def get_recipients(self) -> list[Recipient]:
         """Get list of available message recipients.

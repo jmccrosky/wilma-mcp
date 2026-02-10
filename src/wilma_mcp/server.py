@@ -250,6 +250,32 @@ async def get_message(message_id: str) -> str:
 
 
 @mcp.tool()
+async def set_message_read(message_id: str) -> str:
+    """Mark a message as read.
+
+    Wilma automatically marks messages as read when viewed. This tool
+    explicitly triggers that by viewing the message. Note: Wilma does not
+    support marking messages as unread.
+
+    Args:
+        message_id: The ID of the message to mark as read.
+
+    Returns:
+        Confirmation message or error.
+    """
+    try:
+        client = _get_client()
+        success = await client.mark_message_read(message_id)
+        if success:
+            return f"Message {message_id} marked as read."
+        return f"Failed to mark message {message_id} as read."
+    except WilmaAuthError as e:
+        return f"Authentication error: {e}"
+    except WilmaAPIError as e:
+        return f"API error: {e}"
+
+
+@mcp.tool()
 async def get_recipients() -> str:
     """Get list of available message recipients (teachers, staff).
 

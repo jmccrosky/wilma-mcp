@@ -5,7 +5,7 @@ An [MCP (Model Context Protocol)](https://modelcontextprotocol.io/) server for [
 ## Features
 
 - **Schedule** - View daily or weekly timetables with subjects, times, and teachers
-- **Messages** - Read inbox messages and view full message content
+- **Messages** - Read inbox messages with read/unread status, view full content, mark as read
 - **Recipients** - List available message recipients (teachers, staff)
 - **Send Messages** - Compose and send messages to teachers
 
@@ -112,7 +112,7 @@ Get the schedule for a full week.
 **Example:** "Show me next week's schedule"
 
 ### `get_messages`
-Get list of messages from inbox.
+Get list of messages from inbox. Each message shows a read/unread indicator (📖 read, 📬 unread).
 
 **Parameters:**
 - `folder` (optional): Folder name - "inbox", "sent", or "archive". Defaults to "inbox".
@@ -121,12 +121,20 @@ Get list of messages from inbox.
 **Example:** "Check my messages"
 
 ### `get_message`
-Read a specific message with full content.
+Read a specific message with full content. Note: viewing a message automatically marks it as read on the Wilma server.
 
 **Parameters:**
 - `message_id`: The ID of the message to read.
 
 **Example:** "Read message 12345"
+
+### `set_message_read`
+Explicitly mark a message as read. Useful for marking messages as read without reading their full content. Wilma does not support marking messages as unread — this is a platform limitation.
+
+**Parameters:**
+- `message_id`: The ID of the message to mark as read.
+
+**Example:** "Mark message 12345 as read"
 
 ### `get_recipients`
 Get list of available message recipients (teachers, staff).
@@ -169,6 +177,7 @@ Once configured, you can ask Claude:
 - Authentication uses session cookies obtained via the login flow.
 - Schedule data is extracted from embedded JavaScript in the schedule page.
 - Message lists use a JSON endpoint; individual messages require HTML parsing.
+- **Read/unread tracking**: Wilma's JSON API includes a `Status` field per message — truthy means unread, falsy/absent means read. Viewing a message (GET request) marks it as read server-side. There is no API to mark a message as unread.
 - The server may need updates if Wilma's web interface changes.
 
 ## Development
