@@ -19,6 +19,7 @@ dev = [
 
 [project.scripts]
 wilma-mcp = "wilma_mcp.server:main"
+wilma-cli = "wilma_mcp.cli:main"
 
 [build-system]
 requires = ["hatchling"]

@@ -1,17 +1,142 @@
 ---
 name: wilma-mcp
-description: Access the Finnish school platform Wilma via MCP - view schedules, read and send messages to teachers, and list recipients. Use when the user asks about school schedules, classes, homework, or wants to communicate with teachers through Wilma.
+description: Access the Finnish school platform Wilma via CLI - view schedules, read and send messages to teachers, and list recipients. Use when the user asks about school schedules, classes, homework, or wants to communicate with teachers through Wilma.
 homepage: https://github.com/jessemc98/wilma-mcp
 metadata: {"openclaw":{"emoji":"🏫","requires":{"bins":["python3"],"env":["WILMA_BASE_URL","WILMA_USERNAME","WILMA_PASSWORD"]}}}
 ---
 
-# Wilma MCP
+# Wilma CLI
 
 Access the [Wilma](https://www.visma.com/wilma) Finnish school communication platform. View schedules, read messages, send messages to teachers, and more.
 
+## How to Use
+
+Run commands using the `wilma-cli` entry point (or `python -m wilma_mcp.cli`):
+
+```bash
+cd /path/to/wilma-mcp && source venv/bin/activate && wilma-cli <command> [args]
+```
+
+Or in one line without activating the venv:
+
+```bash
+/path/to/wilma-mcp/venv/bin/python -m wilma_mcp.cli <command> [args]
+```
+
+The CLI reads credentials from environment variables or a `.env` file in the wilma-mcp directory.
+
+## Commands
+
+### Check schedule
+
+```bash
+# Today's schedule
+wilma-cli schedule
+
+# Specific date
+wilma-cli schedule tomorrow
+wilma-cli schedule monday
+wilma-cli schedule 2026-03-15
+
+# Full week
+wilma-cli week
+wilma-cli week monday
+```
+
+Output example:
+```
+Schedule for Wednesday, February 12, 2026:
+  08:00-08:45: Math (Room: 204) - Smith J.
+  09:00-09:45: English (Room: 301) - Johnson A.
+```
+
+### List messages
+
+```bash
+# Inbox (default)
+wilma-cli messages
+
+# Specific folder and limit
+wilma-cli messages --folder sent
+wilma-cli messages --folder inbox --limit 5
+```
+
+Output example:
+```
+Messages in inbox (3 shown):
+
+[12345] (UNREAD) Homework for Monday
+   From: Smith J. | 2026-02-11 14:30
+
+[12340] (READ) Field trip permission
+   From: Johnson A. | 2026-02-10 09:15
+```
+
+### Read a message
+
+```bash
+wilma-cli message 12345
+```
+
+Output example:
+```
+Subject: Homework for Monday
+From: Smith J.
+Date: 2026-02-11 14:30
+
+---
+
+Please complete exercises 1-5 on page 42.
+```
+
+**Note:** Viewing a message automatically marks it as read on the Wilma server.
+
+### Mark a message as read
+
+```bash
+wilma-cli mark-read 12345
+```
+
+### List recipients
+
+```bash
+wilma-cli recipients
+```
+
+Output example:
+```
+Available Recipients:
+
+  [101] Smith John (Teacher)
+  [102] Johnson Anna (Teacher)
+  [200] Admin Office (Staff)
+```
+
+### Send a message
+
+```bash
+wilma-cli send <recipient_id> <subject> <body>
+
+# Example:
+wilma-cli send 101 "Question about homework" "Could you clarify exercise 3?"
+```
+
+Use `wilma-cli recipients` first to find the recipient ID.
+
+### Reply to a message
+
+```bash
+wilma-cli reply <message_id> <body>
+
+# Example:
+wilma-cli reply 12345 "Thank you, I understand now."
+```
+
+This is the preferred way to reply - it automatically handles recipient resolution.
+
 ## Setup
 
-### 1. Install the MCP server
+### 1. Install
 
 ```bash
 git clone https://github.com/jessemc98/wilma-mcp.git
@@ -31,9 +156,16 @@ WILMA_USERNAME=your_username
 WILMA_PASSWORD=your_password
 ```
 
-### 3. Add MCP server to Claude Code
+### 3. Verify it works
 
-Add to your Claude Code MCP settings (`~/.claude.json` or project `.mcp.json`):
+```bash
+source venv/bin/activate
+wilma-cli schedule
+```
+
+## MCP Server (for Claude Code)
+
+This project also provides an MCP server for direct integration with Claude Code. Add to your Claude Code MCP settings (`~/.claude.json` or project `.mcp.json`):
 
 ```json
 {
@@ -47,60 +179,10 @@ Add to your Claude Code MCP settings (`~/.claude.json` or project `.mcp.json`):
 }
 ```
 
-## Available Tools
-
-### `get_schedule`
-Get the school schedule for a specific date.
-- `date_str` (optional): "today", "tomorrow", "yesterday", weekday names (English or Finnish), or dates like "2024-03-15" or "15.3.2024"
-
-### `get_week_schedule`
-Get the full week's schedule starting from a given date.
-- `start_date` (optional): Start date of the week, defaults to today
-
-### `get_messages`
-List messages from a folder. Each message shows a read/unread indicator (📖 read, 📬 unread).
-- `folder` (optional): "inbox", "sent", or "archive" (default: "inbox")
-- `limit` (optional): Max messages to return (default: 20)
-
-### `get_message`
-Read a specific message with full content. Note: viewing a message automatically marks it as read on the Wilma server.
-- `message_id` (required): ID of the message to read
-
-### `set_message_read`
-Explicitly mark a message as read. Wilma does not support marking messages as unread — this is a limitation of the platform, not this tool.
-- `message_id` (required): ID of the message to mark as read
-
-### `get_recipients`
-List available message recipients (teachers, staff) and their IDs.
-
-### `send_message`
-Send a new message to a teacher or staff member.
-- `recipient_id` (required): Recipient ID from `get_recipients`
-- `subject` (required): Message subject
-- `body` (required): Message content
-- `reply_to_id` (optional): Message ID if replying
-
-### `reply_to_message`
-Reply to an existing message. This is the preferred way to reply since it handles recipient resolution automatically via Wilma's reply form.
-- `message_id` (required): ID of the message to reply to (from `get_messages`)
-- `body` (required): Reply message content
-
-## Example Prompts
-
-- "What's my schedule today?"
-- "Show me next week's schedule"
-- "Check my inbox for new messages"
-- "Read message 12345"
-- "Reply to message 12345 saying I'll be there"
-- "Who can I send messages to?"
-- "Send a message to my math teacher about tomorrow's homework"
-- "Do I have any classes on Friday?"
-- "What time does school start tomorrow?"
-
 ## Important Notes
 
-- **Read/unread status**: Messages show as 📖 (read) or 📬 (unread) in `get_messages`. Viewing a message with `get_message` automatically marks it as read. You can also explicitly mark a message as read with `set_message_read`. Wilma does not support marking messages as unread.
-- Use `reply_to_message` to reply to existing messages - it handles recipients automatically.
-- Use `get_recipients` before `send_message` when composing new messages.
+- **Read/unread status**: Messages show as `(READ)` or `(UNREAD)` in `messages`. Viewing a message with `message <id>` automatically marks it as read. Wilma does not support marking messages as unread.
+- Use `reply` to reply to existing messages - it handles recipients automatically.
+- Use `recipients` before `send` when composing new messages.
 - Wilma has no official API; this uses reverse-engineered web endpoints that may change.
 - Supports Finnish language date inputs: "tänään", "huomenna", "maanantai", etc.
