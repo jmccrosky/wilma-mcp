@@ -92,6 +92,28 @@ REPLY_COMPOSE_HTML = """
 """
 
 
+# A trimmed single-message view: metadata table + CKEditor body, plus the modal
+# and unread-badge nav text that used to leak into the parsed content.
+MESSAGE_HTML = """
+<html><head><title>Hyvää lukuvuoden alkua - Wilma</title></head><body>
+  <div class="modal-content">× Varmistus Jatka Peruuta</div>
+  <div class="panel-body" id="page-content-area">
+    <table>
+      <tr><th>Lähettäjä:</th><td>Kivi Pilvi (PK)</td></tr>
+      <tr><th>Vastaanottajat:</th><td>Piilotettu</td></tr>
+      <tr><th>Lähetetty:</th><td>7.8.2026 klo 16:53</td></tr>
+    </table>
+    <div class="ckeditor hidden">
+      <p>Hei kaikki.</p>
+      <p>Ensimmäisenä koulupäivänä koulua on kello 10-12.</p>
+      <p>-Pilvi</p>
+    </div>
+  </div>
+  <span class="badge badge-lg">Sinulla on 3 lukematonta viestiä</span>
+</body></html>
+"""
+
+
 def make_response(status=200, url="https://school.inschool.fi/!0411876/messages",
                   text="", json_body=None):
     """Build a real httpx.Response whose .url is the given url."""
@@ -364,3 +386,27 @@ async def test_get_messages_unknown_folder_raises():
     client._request = Recorder(lambda *_: make_response(json_body={"Messages": []}))
     with pytest.raises(WilmaAPIError):
         await client.get_messages("bogus")
+
+
+# --------------------------------------------------------------------------- #
+# Single-message parsing
+# --------------------------------------------------------------------------- #
+
+def test_parse_message_extracts_metadata_and_clean_body():
+    client = make_client()
+    msg = client._parse_message_from_html(MESSAGE_HTML, "426418")
+
+    assert msg.subject == "Hyvää lukuvuoden alkua"
+    assert msg.sender == "Kivi Pilvi (PK)"  # was blank before the fix
+    assert msg.timestamp.year == 2026 and msg.timestamp.hour == 16 and msg.timestamp.minute == 53
+
+    # Body is the CKEditor content, with paragraph breaks preserved...
+    assert msg.content.startswith("Hei kaikki.")
+    assert "kello 10-12" in msg.content
+    assert msg.content.strip().endswith("-Pilvi")
+    # ...and none of the modal / unread-badge navigation cruft.
+    assert "Varmistus" not in msg.content
+    assert "lukematonta" not in msg.content
+
+    # "Piilotettu" (hidden) recipients are dropped rather than shown literally.
+    assert msg.recipients == []

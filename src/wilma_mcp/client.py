@@ -486,64 +486,73 @@ class WilmaClient:
         return self._parse_message_from_html(response.text, message_id)
 
     def _parse_message_from_html(self, html: str, message_id: str) -> Message:
-        """Parse a single message from HTML response."""
+        """Parse a single message from HTML response.
+
+        Wilma's message view carries the metadata (sender, recipients, sent
+        time) in a small ``label: value`` table and the body in a
+        ``div.ckeditor`` container. We read those directly, which avoids the
+        modal-dialog and navigation text that bleeds in when scraping the whole
+        panel. A best-effort fallback handles older/rare layouts.
+        """
         from bs4 import BeautifulSoup
 
         soup = BeautifulSoup(html, "html.parser")
 
-        # Extract subject from title
+        # Subject from the <title> ("Subject - Wilma").
         title_tag = soup.find("title")
         subject = ""
         if title_tag:
-            # Title format: "Subject - Wilma"
             title_text = title_tag.get_text(strip=True)
             if " - Wilma" in title_text:
                 subject = title_text.rsplit(" - Wilma", 1)[0].strip()
 
-        # Extract sender - look for "Lähettäjä:" label
-        sender = ""
-        sender_label = soup.find(string=re.compile(r"Lähettäjä", re.I))
-        if sender_label:
-            # The sender name is in the next sibling or parent's next element
-            parent = sender_label.find_parent()
-            if parent:
-                next_elem = parent.find_next_sibling()
-                if next_elem:
-                    sender = next_elem.get_text(strip=True)
+        # Metadata table: each row is a "Label:" cell followed by a value cell.
+        meta: dict[str, str] = {}
+        for tr in soup.find_all("tr"):
+            cells = tr.find_all(["th", "td"])
+            if len(cells) >= 2:
+                label = cells[0].get_text(" ", strip=True).rstrip(":").casefold()
+                if label and label not in meta:
+                    meta[label] = cells[1].get_text(" ", strip=True)
 
-        # Extract timestamp
+        sender = meta.get("lähettäjä", "")
+
+        # Recipients ("Piilotettu" = hidden) - only keep if a real value.
+        recipients: list[str] = []
+        rcpt_raw = meta.get("vastaanottajat", "")
+        if rcpt_raw and rcpt_raw.casefold() != "piilotettu":
+            recipients = [r.strip() for r in rcpt_raw.split(",") if r.strip()]
+
+        # Sent timestamp, e.g. "7.8.2026 klo 16:53".
         timestamp = datetime.now()
-        sent_label = soup.find(string=re.compile(r"Lähetetty", re.I))
-        if sent_label:
-            parent = sent_label.find_parent()
-            if parent:
-                next_elem = parent.find_next_sibling()
-                if next_elem:
-                    time_text = next_elem.get_text(strip=True)
-                    # Parse format like "8.2.2026 klo 11:42"
-                    time_match = re.search(r"(\d{1,2})\.(\d{1,2})\.(\d{4})\s*(?:klo\s*)?(\d{1,2})[.:](\d{2})", time_text)
-                    if time_match:
-                        day, month, year = int(time_match.group(1)), int(time_match.group(2)), int(time_match.group(3))
-                        hour, minute = int(time_match.group(4)), int(time_match.group(5))
-                        timestamp = datetime(year, month, day, hour, minute)
+        time_match = re.search(
+            r"(\d{1,2})\.(\d{1,2})\.(\d{4})\s*(?:klo\s*)?(\d{1,2})[.:](\d{2})",
+            meta.get("lähetetty", ""),
+        )
+        if time_match:
+            day, month, year = (int(time_match.group(i)) for i in (1, 2, 3))
+            hour, minute = int(time_match.group(4)), int(time_match.group(5))
+            timestamp = datetime(year, month, day, hour, minute)
 
-        # Extract message content - find the panel-body and get text after metadata
+        # Body lives in the CKEditor content container; join its lines so
+        # paragraph breaks are preserved.
         content = ""
-        panel_body = soup.find("div", class_="panel-body")
-        if panel_body:
-            # Get full text and extract content after "Lähetetty:" timestamp
-            full_text = panel_body.get_text(separator="\n", strip=True)
-            # Split at the timestamp pattern and take everything after
-            parts = re.split(r"\d{1,2}\.\d{1,2}\.\d{4}\s*(?:klo\s*)?\d{1,2}[.:]\d{2}", full_text)
-            if len(parts) > 1:
-                content = parts[-1].strip()
-            else:
-                content = full_text
+        body_el = soup.find("div", class_="ckeditor")
+        if body_el:
+            content = "\n".join(body_el.stripped_strings).strip()
 
-        # Clean up content - remove modal dialogs and UI elements
-        content = re.sub(r"×\s*Varmistus\s*Jatka\s*Peruuta", "", content)
-        content = re.sub(r"Vastaa viestin lähettäjälle", "", content)
-        content = content.strip()
+        if not content:
+            # Fallback: scrape the panel body and strip metadata/modal cruft.
+            panel_body = soup.find("div", class_="panel-body")
+            if panel_body:
+                full_text = panel_body.get_text(separator="\n", strip=True)
+                parts = re.split(
+                    r"\d{1,2}\.\d{1,2}\.\d{4}\s*(?:klo\s*)?\d{1,2}[.:]\d{2}",
+                    full_text,
+                )
+                content = (parts[-1] if len(parts) > 1 else full_text).strip()
+            content = re.sub(r"×\s*Varmistus\s*Jatka\s*Peruuta", "", content)
+            content = re.sub(r"Vastaa viestin lähettäjälle", "", content).strip()
 
         return Message(
             id=message_id,
@@ -551,6 +560,7 @@ class WilmaClient:
             sender=sender,
             timestamp=timestamp,
             content=content,
+            recipients=recipients,
             is_read=True,
         )
 
