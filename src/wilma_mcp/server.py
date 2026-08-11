@@ -67,9 +67,11 @@ def _format_schedule(schedule: DaySchedule) -> str:
 def _format_message_summary(msg: MessageSummary) -> str:
     """Format a message summary for display."""
     read_status = "📖" if msg.is_read else "📬"
+    # In sent/drafts folders msg.sender holds the recipient(s).
+    direction = "To" if msg.folder in ("sent", "outbox", "drafts") else "From"
     return (
         f"{read_status} [{msg.id}] {msg.subject}\n"
-        f"   From: {msg.sender} | {msg.timestamp.strftime('%Y-%m-%d %H:%M')}"
+        f"   {direction}: {msg.sender} | {msg.timestamp.strftime('%Y-%m-%d %H:%M')}"
     )
 
 
@@ -202,14 +204,18 @@ async def get_messages(folder: str = "inbox", limit: int = 20) -> str:
     """Get list of messages from a folder.
 
     Args:
-        folder: Folder to read from. Options: "inbox", "sent", "archive"
+        folder: Folder to read from. Options: "inbox", "sent", "archive", "drafts"
         limit: Maximum number of messages to return (default 20)
 
     Returns:
-        List of messages with ID, subject, sender, and timestamp.
+        List of messages with ID, subject, counterparty, and timestamp.
+        For "sent"/"drafts" the counterparty shown is the recipient.
     """
-    if folder not in ("inbox", "sent", "archive"):
-        return f"Invalid folder: {folder}. Use 'inbox', 'sent', or 'archive'."
+    if folder not in ("inbox", "sent", "archive", "drafts"):
+        return (
+            f"Invalid folder: {folder}. "
+            "Use 'inbox', 'sent', 'archive', or 'drafts'."
+        )
 
     try:
         client = _get_client()
@@ -276,24 +282,32 @@ async def set_message_read(message_id: str) -> str:
 
 
 @mcp.tool()
-async def get_recipients() -> str:
-    """Get list of available message recipients (teachers, staff).
+async def get_recipients(query: Optional[str] = None) -> str:
+    """Get list of available message recipients (teachers, staff, guardians).
+
+    Args:
+        query: Optional case-insensitive name filter (e.g. a teacher's surname).
+            Useful because a school's full recipient list can be long.
 
     Returns:
-        List of recipients with their IDs and roles.
+        List of recipients, each with an id you can pass straight to
+        send_message, plus the person's name and role.
     """
     try:
         client = _get_client()
-        recipients = await client.get_recipients()
+        recipients = await client.get_recipients(query=query)
 
         if not recipients:
-            return "No recipients found."
+            hint = f" matching '{query}'" if query else ""
+            return f"No recipients found{hint}."
 
         lines = ["Available Recipients:", ""]
         for rec in recipients:
             role_info = f" ({rec.role})" if rec.role else ""
-            school_info = f" - {rec.school}" if rec.school else ""
-            lines.append(f"  [{rec.id}] {rec.name}{role_info}{school_info}")
+            lines.append(f"  {rec.name}{role_info}")
+            lines.append(f"      id: {rec.id}")
+        lines.append("")
+        lines.append("Pass the id string to send_message to write to that person.")
         return "\n".join(lines)
     except WilmaAuthError as e:
         return f"Authentication error: {e}"
@@ -303,24 +317,27 @@ async def get_recipients() -> str:
 
 @mcp.tool()
 async def send_message(
-    recipient_id: str,
+    recipient: str,
     subject: str,
     body: str,
-    reply_to_id: Optional[str] = None,
 ) -> str:
-    """Send a message to a teacher or staff member.
+    """Send a new message to a teacher, staff member, or guardian.
 
     Args:
-        recipient_id: ID of the recipient (use get_recipients to find IDs)
-        subject: Message subject
-        body: Message body/content
-        reply_to_id: Optional message ID if this is a reply
+        recipient: Who to send to. Either a person's name (e.g. "Galiana Fatima",
+            resolved automatically via the recipient list) or a recipient id
+            from get_recipients (e.g. "r_guardian=11876_2893&n_class=33"). Using a
+            name is convenient; using an id is unambiguous. To address several
+            people, join their ids with "&".
+        subject: Message subject.
+        body: Message body/content.
 
     Returns:
-        Confirmation message or error.
+        Confirmation message or error. If a name is ambiguous, the error lists
+        the matching recipients so you can pick a specific id.
     """
-    if not recipient_id.strip():
-        return "Error: recipient_id is required"
+    if not recipient.strip():
+        return "Error: recipient is required"
     if not subject.strip():
         return "Error: subject is required"
     if not body.strip():
@@ -329,13 +346,12 @@ async def send_message(
     try:
         client = _get_client()
         success = await client.send_message(
-            recipient_ids=[recipient_id],
+            recipient=recipient,
             subject=subject,
             body=body,
-            reply_to_id=reply_to_id,
         )
         if success:
-            return f"Message sent successfully to recipient {recipient_id}."
+            return f"Message sent successfully to {recipient}."
         return "Failed to send message."
     except WilmaAuthError as e:
         return f"Authentication error: {e}"

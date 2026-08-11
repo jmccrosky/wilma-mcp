@@ -115,10 +115,12 @@ Get the schedule for a full week.
 Get list of messages from inbox. Each message shows a read/unread indicator (📖 read, 📬 unread).
 
 **Parameters:**
-- `folder` (optional): Folder name - "inbox", "sent", or "archive". Defaults to "inbox".
+- `folder` (optional): Folder name - "inbox", "sent", "archive", or "drafts". Defaults to "inbox".
 - `limit` (optional): Maximum messages to return. Defaults to 20.
 
-**Example:** "Check my messages"
+For "sent" and "drafts" the listing shows the **recipient** ("To:") rather than the sender.
+
+**Example:** "Check my messages" / "Show my sent messages"
 
 ### `get_message`
 Read a specific message with full content. Note: viewing a message automatically marks it as read on the Wilma server.
@@ -137,20 +139,28 @@ Explicitly mark a message as read. Useful for marking messages as read without r
 **Example:** "Mark message 12345 as read"
 
 ### `get_recipients`
-Get list of available message recipients (teachers, staff).
-
-**Example:** "Who can I send messages to?"
-
-### `send_message`
-Send a new message to a teacher or staff member.
+Get list of available message recipients (teachers, staff, guardians).
 
 **Parameters:**
-- `recipient_id`: ID of the recipient (use `get_recipients` to find IDs)
+- `query` (optional): Case-insensitive name filter (e.g. a teacher's surname). Handy because a school's full recipient list can be long.
+
+Each returned recipient has an `id` string (e.g. `r_guardian=11876_2893&n_class=33`) that you can pass straight to `send_message`.
+
+**Example:** "Who can I send messages to?" / "Find the recipient for Mr. Smith"
+
+### `send_message`
+Send a new message to any recipient (teacher, staff member, or guardian).
+
+**Parameters:**
+- `recipient`: Who to send to — either a person's **name** (e.g. `"Galiana Fatima"`, resolved automatically against the recipient list) or a recipient **id** from `get_recipients` (e.g. `"r_guardian=11876_2893&n_class=33"`). To address several people, join their ids with `&`.
 - `subject`: Message subject
 - `body`: Message body/content
-- `reply_to_id` (optional): Message ID if this is a reply
 
-**Example:** "Send a message to teacher 123 about homework"
+If a name matches more than one person, the tool returns the list of matches so you can pick a specific id (it will not guess).
+
+**Example:** "Send a message to Mr. Smith about homework"
+
+> To reply to an existing message, use `reply_to_message` instead — it resolves the recipient automatically from the original message.
 
 ### `reply_to_message`
 Reply to an existing message. This is the preferred way to reply since it handles recipient resolution automatically via Wilma's reply form, without needing to look up recipient IDs.
@@ -176,8 +186,9 @@ Once configured, you can ask Claude:
 - Wilma has no official public API. This server reverse-engineers the web interface.
 - Authentication uses session cookies obtained via the login flow.
 - Schedule data is extracted from embedded JavaScript in the schedule page.
-- Message lists use a JSON endpoint; individual messages require HTML parsing.
+- Message lists use per-folder JSON endpoints (`/messages/list` for the inbox, `/messages/list/outbox` for sent, `/messages/list/archive`, `/messages/list/drafts`); individual messages require HTML parsing.
 - **Read/unread tracking**: Wilma's JSON API includes a `Status` field per message — truthy means unread, falsy/absent means read. Viewing a message (GET request) marks it as read server-side. There is no API to mark a message as unread.
+- **Sending messages**: Wilma does not expose recipients as `<option>` elements. The recipient picker (`/messages/recipients`) embeds each reachable person as a `.recipient-block` whose `data-source` link encodes a selector of the form `r_<type>=<id>` (e.g. `r_guardian`, `r_personnel`, `r_ownteachers`). To compose, the server GETs `/messages/compose?<selector>` (which returns the form with a fresh `formkey` and the recipient pre-added as a hidden `r_<type>` input), fills the `Subject` and `BodyText` fields, and POSTs with the `addsavebtn` "send" button. This is why new messages now work, not only replies.
 - The server may need updates if Wilma's web interface changes.
 
 ## Development

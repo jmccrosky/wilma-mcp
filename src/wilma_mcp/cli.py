@@ -9,8 +9,8 @@ Commands:
     messages [--folder F] [--limit N]  List messages
     message <id>                 Read a specific message
     mark-read <id>               Mark a message as read
-    recipients                   List message recipients
-    send <recipient_id> <subject> <body>  Send a message
+    recipients [name-filter]     List message recipients
+    send <recipient> <subject> <body>  Send a message (recipient = name or id)
     reply <message_id> <body>    Reply to a message
 """
 
@@ -162,8 +162,8 @@ async def cmd_messages(args):
             folder = args[i]
             i += 1
 
-    if folder not in ("inbox", "sent", "archive"):
-        print(f"Error: Invalid folder '{folder}'. Use 'inbox', 'sent', or 'archive'.", file=sys.stderr)
+    if folder not in ("inbox", "sent", "archive", "drafts"):
+        print(f"Error: Invalid folder '{folder}'. Use 'inbox', 'sent', 'archive', or 'drafts'.", file=sys.stderr)
         sys.exit(1)
 
     client = _get_client()
@@ -172,12 +172,14 @@ async def cmd_messages(args):
         if not messages:
             print(f"No messages in {folder}.")
             return
+        # In sent/drafts folders msg.sender holds the recipient(s).
+        direction = "To" if folder in ("sent", "drafts") else "From"
         print(f"Messages in {folder} ({len(messages)} shown):")
         print()
         for msg in messages:
             status = "READ" if msg.is_read else "UNREAD"
             print(f"[{msg.id}] ({status}) {msg.subject}")
-            print(f"   From: {msg.sender} | {msg.timestamp.strftime('%Y-%m-%d %H:%M')}")
+            print(f"   {direction}: {msg.sender} | {msg.timestamp.strftime('%Y-%m-%d %H:%M')}")
             print()
     finally:
         await client.close()
@@ -224,38 +226,44 @@ async def cmd_mark_read(args):
 
 
 async def cmd_recipients(args):
+    query = args[0] if args else None
     client = _get_client()
     try:
-        recipients = await client.get_recipients()
+        recipients = await client.get_recipients(query=query)
         if not recipients:
-            print("No recipients found.")
+            hint = f" matching '{query}'" if query else ""
+            print(f"No recipients found{hint}.")
             return
         print("Available Recipients:")
         print()
         for rec in recipients:
             role_info = f" ({rec.role})" if rec.role else ""
-            school_info = f" - {rec.school}" if rec.school else ""
-            print(f"  [{rec.id}] {rec.name}{role_info}{school_info}")
+            print(f"  {rec.name}{role_info}")
+            print(f"      id: {rec.id}")
     finally:
         await client.close()
 
 
 async def cmd_send(args):
     if len(args) < 3:
-        print("Error: requires <recipient_id> <subject> <body>", file=sys.stderr)
+        print("Error: requires <recipient> <subject> <body>", file=sys.stderr)
+        print(
+            "  <recipient> is a name or an id from `recipients`.",
+            file=sys.stderr,
+        )
         sys.exit(1)
-    recipient_id = args[0]
+    recipient = args[0]
     subject = args[1]
     body = args[2]
     client = _get_client()
     try:
         success = await client.send_message(
-            recipient_ids=[recipient_id],
+            recipient=recipient,
             subject=subject,
             body=body,
         )
         if success:
-            print(f"Message sent successfully to recipient {recipient_id}.")
+            print(f"Message sent successfully to {recipient}.")
         else:
             print("Failed to send message.", file=sys.stderr)
             sys.exit(1)
@@ -301,11 +309,11 @@ Usage: python -m wilma_mcp.cli <command> [options]
 Commands:
   schedule [date]                        Get schedule for a date (default: today)
   week [start_date]                      Get week schedule (default: this week)
-  messages [--folder inbox|sent|archive] [--limit N]  List messages
+  messages [--folder inbox|sent|archive|drafts] [--limit N]  List messages
   message <id>                           Read a specific message
   mark-read <id>                         Mark a message as read
-  recipients                             List available message recipients
-  send <recipient_id> <subject> <body>   Send a new message
+  recipients [name-filter]               List available message recipients
+  send <recipient> <subject> <body>      Send a new message (recipient = name or id)
   reply <message_id> <body>              Reply to a message
 
 Date formats: today, tomorrow, yesterday, monday-sunday, YYYY-MM-DD, DD.MM.YYYY

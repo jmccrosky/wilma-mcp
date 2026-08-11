@@ -4,6 +4,7 @@ import json
 import re
 from datetime import date, datetime, timedelta
 from typing import Any, Optional
+from urllib.parse import parse_qsl, urlsplit
 
 import httpx
 
@@ -26,6 +27,22 @@ class WilmaAPIError(Exception):
     """Raised when an API request fails."""
 
     pass
+
+
+# Friendly labels for Wilma recipient "types" (the r_<type> field key).
+_RECIPIENT_ROLE_LABELS = {
+    "guardian": "Guardian",
+    "personnel": "Staff",
+    "teacher": "Teacher",
+    "ownteachers": "Teachers",
+    "schoolteacher": "Teacher",
+    "schoolpersonnel": "Staff",
+    "student": "Student",
+    "class": "Class",
+    "group": "Group",
+    "classguardian": "Class guardians",
+    "groupguardian": "Group guardians",
+}
 
 
 class WilmaClient:
@@ -384,14 +401,28 @@ class WilmaClient:
         """Get list of messages from a folder.
 
         Args:
-            folder: Folder name (inbox, sent, archive)
+            folder: Folder name (inbox, sent, archive, drafts)
             limit: Maximum number of messages to return
 
         Returns:
             List of MessageSummary objects
         """
-        # Use the JSON endpoint
-        path = "/messages/list/index_json"
+        # Each folder is a distinct list endpoint. Wilma builds these as
+        # /messages/list[/<box>] (the inbox has no box suffix); "sent" maps to
+        # Wilma's "outbox" box.
+        folder_paths = {
+            "inbox": "/messages/list/index_json",
+            "sent": "/messages/list/outbox",
+            "outbox": "/messages/list/outbox",
+            "archive": "/messages/list/archive",
+            "drafts": "/messages/list/drafts",
+        }
+        path = folder_paths.get(folder)
+        if path is None:
+            raise WilmaAPIError(
+                f"Unknown folder '{folder}'. "
+                "Use inbox, sent, archive, or drafts."
+            )
 
         response = await self._request("GET", path)
 
@@ -408,6 +439,10 @@ class WilmaClient:
         messages = []
         msg_list = data.get("Messages", [])
 
+        # In the sent/drafts folders the account owner is the Sender, so the
+        # useful counterparty is the Recipient instead.
+        show_recipient = folder in ("sent", "outbox", "drafts")
+
         for msg in msg_list[:limit]:
             # Parse timestamp (format: "2026-02-08 11:42")
             timestamp_str = msg.get("TimeStamp", "")
@@ -416,12 +451,17 @@ class WilmaClient:
             except ValueError:
                 timestamp = datetime.now()
 
+            if show_recipient:
+                counterparty = msg.get("Recipient") or msg.get("Sender") or ""
+            else:
+                counterparty = msg.get("Sender") or msg.get("Recipient") or ""
+
             # Status field: truthy (e.g. 1) = unread/new, falsy/missing = read
             # Wilma's frontend uses Status to show bold "Uusi" (New) badge
             message = MessageSummary(
                 id=str(msg.get("Id", "")),
                 subject=msg.get("Subject", ""),
-                sender=msg.get("Sender", ""),
+                sender=counterparty,
                 timestamp=timestamp,
                 is_read=not msg.get("Status"),
                 folder=msg.get("Folder", folder),
@@ -531,200 +571,292 @@ class WilmaClient:
         # A successful page load (not a redirect to login or error) means read
         return response.status_code == 200
 
-    async def get_recipients(self) -> list[Recipient]:
-        """Get list of available message recipients.
+    async def get_recipients(self, query: Optional[str] = None) -> list[Recipient]:
+        """Get available message recipients.
 
-        Tries multiple strategies since Wilma may load recipients
-        dynamically via JavaScript rather than server-side HTML.
+        Wilma does not expose recipients as ``<option>`` elements. Instead the
+        compose flow opens a side panel (``/messages/recipients``) that embeds
+        every reachable recipient as a clickable ``.recipient-block`` button.
+        Each button carries a ``data-source`` link of the form
+        ``/messages/compose?r_<type>=<id>[&n_class=<c>]`` which is exactly the
+        selector needed to address that recipient. We parse those blocks; the
+        selector querystring becomes the recipient's ``id`` so it can be passed
+        straight back to :meth:`send_message`.
+
+        Args:
+            query: Optional case-insensitive substring to filter by name.
 
         Returns:
-            List of Recipient objects (teachers, staff, etc.)
+            List of Recipient objects.
         """
-        # Get the compose page
-        path = "/messages/compose"
-        response = await self._request("GET", path)
-        html = response.text
+        response = await self._request("GET", "/messages/recipients")
+        recipients = self._parse_recipient_panel(response.text)
 
-        # Strategy 1: Parse from <option> elements (server-rendered)
-        recipients = self._parse_recipients_from_html(html)
-        if recipients:
-            return recipients
+        if query:
+            q = query.casefold()
+            recipients = [r for r in recipients if q in r.name.casefold()]
 
-        # Strategy 2: Extract from embedded JavaScript data
-        # (Wilma may embed recipient data in JS variables for dynamic loading)
-        recipients = self._parse_recipients_from_js(html)
-        if recipients:
-            return recipients
+        return recipients
 
-        return []
-
-    def _parse_recipients_from_html(self, html: str) -> list[Recipient]:
-        """Parse recipients from compose page HTML <option> elements."""
+    def _parse_recipient_panel(self, html: str) -> list[Recipient]:
+        """Parse recipients from the ``/messages/recipients`` side panel HTML."""
         from bs4 import BeautifulSoup
 
         soup = BeautifulSoup(html, "html.parser")
-        recipients = []
+        recipients: list[Recipient] = []
+        seen: set[str] = set()
 
-        # Look for select options or recipient list
-        options = soup.find_all("option")
-        for option in options:
-            value = option.get("value", "")
-            if value and value != "0" and value != "":
-                name = option.get_text(strip=True)
-                if name:
-                    # Extract role from parentheses if present
-                    role = None
-                    role_match = re.search(r"\(([^)]+)\)$", name)
-                    if role_match:
-                        role = role_match.group(1)
-                        name = name.rsplit("(", 1)[0].strip()
-
-                    recipient = Recipient(
-                        id=value,
-                        name=name,
-                        role=role,
-                    )
-                    recipients.append(recipient)
-
-        return recipients
-
-    def _parse_recipients_from_js(self, html: str) -> list[Recipient]:
-        """Extract recipient data from embedded JavaScript in compose page.
-
-        Wilma may embed recipient data in JavaScript variables or
-        widget initialization data (e.g., select2/chosen dropdowns).
-        """
-        recipients = []
-
-        # Pattern 1: select2/chosen widget data - data: [{id: "...", text: "..."}]
-        data_match = re.search(
-            r"data\s*:\s*(\[(?:[^[\]]*|\[(?:[^[\]]*|\[[^[\]]*\])*\])*\])",
-            html,
-        )
-        if data_match:
-            try:
-                data = json.loads(data_match.group(1))
-                recipients = self._recipients_from_json_list(data)
-                if recipients:
-                    return recipients
-            except (json.JSONDecodeError, TypeError):
-                pass
-
-        # Pattern 2: Variable assignments with recipient arrays
-        # e.g., var recipients = [...] or recipientData = [...]
-        for pattern in [
-            r"(?:recipients|vastaanottajat|rcptList|recipientData)\s*=\s*(\[.*?\])\s*;",
-            r"JSON\.parse\(\s*['\"](\[.*?\])['\"]",
-        ]:
-            match = re.search(pattern, html, re.DOTALL)
-            if match:
-                try:
-                    data = json.loads(match.group(1))
-                    recipients = self._recipients_from_json_list(data)
-                    if recipients:
-                        return recipients
-                except (json.JSONDecodeError, TypeError):
-                    pass
-
-        return recipients
-
-    def _recipients_from_json_list(self, data: list) -> list[Recipient]:
-        """Convert a JSON list of recipient objects to Recipient models."""
-        recipients = []
-        for item in data:
-            if not isinstance(item, dict):
+        for block in soup.select("[data-source]"):
+            source = block.get("data-source", "")
+            if "messages/compose" not in source:
                 continue
-            rid = str(
-                item.get("id", item.get("Id", item.get("ID", "")))
-            )
-            name = str(
-                item.get("text", item.get("name", item.get("Name", "")))
-            )
-            if not rid or not name:
+
+            selector = urlsplit(source).query  # e.g. "r_guardian=11876_2893&n_class=33"
+            if not selector:
                 continue
-            # Extract role from parentheses if present
-            role = None
-            role_match = re.search(r"\(([^)]+)\)$", name)
-            if role_match:
-                role = role_match.group(1)
-                name = name.rsplit("(", 1)[0].strip()
-            recipients.append(Recipient(id=rid, name=name, role=role))
+
+            # Identify the recipient type from the r_<type>/s_<type> parameter.
+            rtype: Optional[str] = None
+            for key, _value in parse_qsl(selector):
+                if key.startswith(("r_", "s_")):
+                    rtype = key[2:]
+                    break
+            if rtype is None:
+                continue
+
+            if selector in seen:
+                continue
+            seen.add(selector)
+
+            name = " ".join(block.get_text(" ", strip=True).split())
+            # Group blocks (e.g. "all teachers") often carry the descriptive
+            # member list in the title attribute.
+            title = block.get("title") or None
+            if not name:
+                name = title or selector
+
+            role = _RECIPIENT_ROLE_LABELS.get(rtype, rtype)
+            recipients.append(
+                Recipient(id=selector, name=name, role=role, school=title)
+            )
+
         return recipients
 
-    async def send_message(
-        self,
-        recipient_ids: list[str],
-        subject: str,
-        body: str,
-        reply_to_id: Optional[str] = None,
-    ) -> bool:
-        """Send a message.
+    async def _resolve_recipient_selector(self, recipient: str) -> str:
+        """Resolve a recipient reference to a compose selector querystring.
 
-        Args:
-            recipient_ids: List of recipient IDs
-            subject: Message subject
-            body: Message body
-            reply_to_id: Optional message ID if this is a reply
-
-        Returns:
-            True if message was sent successfully
+        Accepts either a selector token already produced by
+        :meth:`get_recipients` (e.g. ``"r_guardian=11876_2893&n_class=33"``) or a
+        display name to look up in the recipient panel.
 
         Raises:
-            WilmaAPIError: If sending fails
+            WilmaAPIError: If the name matches zero or several recipients.
         """
-        # First, get the compose form to obtain formkey
-        compose_response = await self._request("GET", "/messages/compose")
+        recipient = recipient.strip()
 
-        # Extract formkey
-        formkey_match = re.search(
-            r'name="formkey"\s+value="([^"]*)"', compose_response.text
-        )
-        if not formkey_match:
-            formkey_match = re.search(
-                r'value="([^"]*)"\s+name="formkey"', compose_response.text
+        # Already a selector token (contains an r_/s_ parameter)?
+        if re.search(r"(?:^|&)[rs]_[a-z]+=", recipient):
+            return recipient
+
+        matches = await self.get_recipients(query=recipient)
+        if not matches:
+            raise WilmaAPIError(
+                f"No recipient found matching '{recipient}'. "
+                "Use get_recipients to see who is available."
             )
-        formkey = formkey_match.group(1) if formkey_match else ""
 
-        # Prepare message data
-        data = {
-            "formkey": formkey,
-            "rcpt": ",".join(recipient_ids),
-            "subject": subject,
-            "body": body,
-        }
+        # Prefer a single exact (case-insensitive) name match if one exists.
+        exact = [m for m in matches if m.name.casefold() == recipient.casefold()]
+        if len(exact) == 1:
+            return exact[0].id
+        if len(matches) == 1:
+            return matches[0].id
 
-        if reply_to_id:
-            data["replyto"] = reply_to_id
+        candidates = ", ".join(f"'{m.name}'" for m in matches[:10])
+        raise WilmaAPIError(
+            f"Recipient '{recipient}' is ambiguous - it matches: {candidates}. "
+            "Please be more specific or pass the recipient id from get_recipients."
+        )
 
+    def _find_compose_form(self, soup: Any) -> Any:
+        """Locate the message compose form (the one with a body textarea)."""
+        for candidate in soup.find_all("form"):
+            action = (candidate.get("action") or "").lower()
+            if "logout" in action:
+                continue
+            if candidate.find("textarea"):
+                return candidate
+        return None
+
+    async def _submit_compose_form(
+        self,
+        html: str,
+        body: str,
+        subject: Optional[str] = None,
+    ) -> bool:
+        """Build and POST a Wilma compose form.
+
+        Collects the form's existing fields (formkey/CSRF token, wysiwyg mode,
+        pre-filled recipient ``r_<type>`` hidden inputs, and any pre-filled
+        Subject) from the given compose HTML, fills in the subject/body, adds the
+        "send" submit button, and posts the form.
+
+        Args:
+            html: HTML of a compose page (new message or reply form).
+            body: Message body text.
+            subject: Subject to set. If None, any pre-filled subject (e.g. the
+                "VS:"/"Re:" of a reply) is left untouched.
+
+        Returns:
+            True if the message appears to have been sent.
+
+        Raises:
+            WilmaAPIError: If the form can't be found or the send fails.
+        """
+        from bs4 import BeautifulSoup
+
+        soup = BeautifulSoup(html, "html.parser")
+        form = self._find_compose_form(soup)
+        if form is None:
+            raise WilmaAPIError("Could not locate the compose form")
+
+        data: dict[str, str] = {}
+        subject_field: Optional[str] = None
+        send_button: Optional[tuple[str, str]] = None
+
+        for inp in form.find_all("input"):
+            name = inp.get("name")
+            if not name:
+                continue
+            itype = (inp.get("type") or "text").lower()
+            value = inp.get("value") or ""
+
+            if itype in ("hidden", "text"):
+                # Carries formkey, wysiwyg, recipient r_* fields, Subject, etc.
+                data[name] = value
+                if name.casefold() == "subject":
+                    subject_field = name
+            elif itype == "checkbox":
+                # Only submit checkboxes that are checked by default.
+                if inp.has_attr("checked"):
+                    data[name] = value or "true"
+            elif itype == "submit":
+                # Remember the "send" button; ignore draft/cancel buttons so we
+                # never accidentally save a draft or discard the message.
+                if name == "addsavebtn":
+                    send_button = (name, value)
+                elif send_button is None and name not in ("draftbtn", "cancelbtn"):
+                    send_button = (name, value)
+
+        # Determine the body textarea field name.
+        textarea = form.find("textarea")
+        body_field = (
+            textarea.get("name") if textarea and textarea.get("name") else "BodyText"
+        )
+
+        # Verify a recipient is present before sending.
+        if not any(k.startswith(("r_", "s_")) for k in data):
+            raise WilmaAPIError(
+                "Compose form has no recipient - refusing to send. "
+                "The recipient selector may be invalid."
+            )
+
+        if subject is not None:
+            data[subject_field or "Subject"] = subject
+        data[body_field] = body
+
+        if send_button is not None:
+            data[send_button[0]] = send_button[1]
+
+        # Never submit the draft/cancel actions.
+        data.pop("draftbtn", None)
+        data.pop("cancelbtn", None)
+
+        action = form.get("action") or "/messages/compose"
         response = await self._request(
             "POST",
-            "/messages/compose",
+            action,
             data=data,
             headers={"Content-Type": "application/x-www-form-urlencoded"},
         )
+        return self._check_send_result(response)
 
-        # Check for success - should redirect to messages list
-        if "messages" in str(response.url).lower():
+    def _check_send_result(self, response: httpx.Response) -> bool:
+        """Interpret the response to a compose POST.
+
+        On success Wilma redirects away from the compose page back to the
+        messages listing. If the compose form is redisplayed, the send was
+        rejected (e.g. validation error).
+        """
+        final_url = str(response.url).lower()
+
+        if "/messages" in final_url and "/compose" not in final_url:
             return True
 
-        # Check for error messages in response
-        if "error" in response.text.lower() or "virhe" in response.text.lower():
-            raise WilmaAPIError("Failed to send message - server returned an error")
+        if "/compose" in final_url:
+            # Compose form redisplayed - surface any error text if we can find it.
+            from bs4 import BeautifulSoup
 
-        # If we didn't redirect to messages and no explicit error,
-        # something unexpected happened
+            soup = BeautifulSoup(response.text, "html.parser")
+            alert = soup.find(class_=re.compile(r"\balert\b", re.I))
+            detail = ""
+            if alert:
+                detail = " ".join(alert.get_text(" ", strip=True).split())[:200]
+            raise WilmaAPIError(
+                "Message was not sent - Wilma redisplayed the compose form"
+                + (f": {detail}" if detail else " (possible validation error).")
+            )
+
+        # Some instances render the sent-confirmation at a 200 without a
+        # /messages URL; check the body as a fallback.
+        text = response.text.lower()
+        if "viesti on lähetetty" in text or "message has been sent" in text:
+            return True
+
         raise WilmaAPIError(
-            "Message may not have been sent - unexpected response from server"
+            "Unexpected response after sending message - could not confirm delivery."
+        )
+
+    async def send_message(
+        self,
+        recipient: str,
+        subject: str,
+        body: str,
+    ) -> bool:
+        """Send a new message to a recipient.
+
+        Args:
+            recipient: Either a display name (looked up in the recipient panel)
+                or a selector id returned by :meth:`get_recipients`
+                (e.g. ``"r_guardian=11876_2893&n_class=33"``). To address several
+                recipients, join their selector ids with ``&``.
+            subject: Message subject.
+            body: Message body.
+
+        Returns:
+            True if the message was sent successfully.
+
+        Raises:
+            WilmaAPIError: If the recipient can't be resolved or sending fails.
+        """
+        selector = await self._resolve_recipient_selector(recipient)
+
+        # GET the compose form with the recipient preselected. This mirrors the
+        # no-JavaScript path of clicking a recipient block: Wilma returns the
+        # compose form with a fresh formkey and the recipient added as a hidden
+        # r_<type> input.
+        compose_response = await self._request("GET", f"/messages/compose?{selector}")
+
+        return await self._submit_compose_form(
+            compose_response.text, body=body, subject=subject
         )
 
     async def reply_to_message(self, message_id: str, body: str) -> bool:
         """Reply to a message by ID.
 
-        Fetches the original message page to find the actual reply link,
-        then follows it to get the reply compose form with pre-filled
-        recipient info. This avoids the need to look up recipient IDs
-        separately (which fails when the recipient list is loaded
-        dynamically via JavaScript).
+        Fetches the original message page to find the actual reply link, then
+        follows it to get the reply compose form with pre-filled recipient and
+        subject. This avoids having to look up recipient ids separately.
 
         Args:
             message_id: ID of the message to reply to
@@ -738,14 +870,13 @@ class WilmaClient:
         """
         from bs4 import BeautifulSoup
 
-        # Step 1: Fetch the original message page to find the reply link
+        # Step 1: Fetch the original message page to find the reply link.
         msg_response = await self._request("GET", f"/messages/{message_id}")
         msg_soup = BeautifulSoup(msg_response.text, "html.parser")
 
-        # Find the reply link - Wilma uses "Vastaa" (Reply) button
+        # Find the reply link - Wilma uses "Vastaa" (Reply) button.
         reply_link = msg_soup.find("a", string=re.compile(r"Vastaa", re.I))
         if not reply_link:
-            # Also try finding by href pattern
             reply_link = msg_soup.find(
                 "a", href=re.compile(r"compose.*(?:answer|reply)", re.I)
             )
@@ -754,84 +885,9 @@ class WilmaClient:
                 f"Could not find reply link on message {message_id}"
             )
 
-        reply_url = reply_link["href"]
-
-        # Step 2: Follow the reply link to get the compose form
-        # The href may already include the user prefix (e.g., /!0411876/...)
-        compose_response = await self._request("GET", reply_url)
-        html = compose_response.text
-
-        # Extract formkey (CSRF token)
-        formkey_match = re.search(
-            r'name="formkey"\s+value="([^"]*)"', html
-        )
-        if not formkey_match:
-            formkey_match = re.search(
-                r'value="([^"]*)"\s+name="formkey"', html
-            )
-        if not formkey_match:
-            raise WilmaAPIError(
-                "Could not extract formkey from reply compose form"
-            )
-        formkey = formkey_match.group(1)
-
-        # Step 3: Find the compose form specifically (not logout/nav forms)
-        soup = BeautifulSoup(html, "html.parser")
-
-        # Find the form that contains a textarea (the message compose form)
-        form = None
-        for candidate in soup.find_all("form"):
-            if candidate.find("textarea"):
-                form = candidate
-                break
-
-        data: dict[str, str] = {"formkey": formkey}
-
-        if form:
-            # Collect all form inputs (hidden and text) that have pre-filled
-            # values. This includes hidden fields (rcpt, answer, etc.) and
-            # text fields like Subject which Wilma pre-fills for replies.
-            for form_input in form.find_all(
-                "input", {"type": ["hidden", "text"]}
-            ):
-                name = form_input.get("name", "")
-                value = form_input.get("value", "")
-                if name and name != "formkey":
-                    data[name] = value
-
-            # Find the textarea name for the message body field
-            textarea = form.find("textarea")
-            body_field = textarea.get("name", "body") if textarea else "body"
-        else:
-            body_field = "body"
-
-        # Set the reply body
-        data[body_field] = body
-
-        # Determine POST URL from compose form action
-        post_url = "/messages/compose"
-        if form and form.get("action"):
-            action = form["action"]
-            if action.startswith("/") and "logout" not in action.lower():
-                post_url = action
-
-        response = await self._request(
-            "POST",
-            post_url,
-            data=data,
-            headers={"Content-Type": "application/x-www-form-urlencoded"},
-        )
-
-        # Check for success - should redirect to messages list
-        if "messages" in str(response.url).lower():
-            return True
-
-        # Check for error messages in response
-        if "error" in response.text.lower() or "virhe" in response.text.lower():
-            raise WilmaAPIError("Failed to send reply - server returned an error")
-
-        # If we didn't redirect to messages and no explicit error,
-        # something unexpected happened
-        raise WilmaAPIError(
-            "Reply may not have been sent - unexpected response from server"
+        # Step 2: Follow the reply link to get the compose form, then submit it.
+        # Subject is left as None so Wilma's pre-filled "VS:" subject is kept.
+        compose_response = await self._request("GET", reply_link["href"])
+        return await self._submit_compose_form(
+            compose_response.text, body=body, subject=None
         )

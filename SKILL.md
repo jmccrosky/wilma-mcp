@@ -57,7 +57,9 @@ Schedule for Wednesday, February 12, 2026:
 wilma-cli messages
 
 # Specific folder and limit
-wilma-cli messages --folder sent
+wilma-cli messages --folder sent      # sent/drafts show the recipient ("To:")
+wilma-cli messages --folder archive
+wilma-cli messages --folder drafts
 wilma-cli messages --folder inbox --limit 5
 ```
 
@@ -100,28 +102,42 @@ wilma-cli mark-read 12345
 ### List recipients
 
 ```bash
+# All recipients
 wilma-cli recipients
+
+# Filter by name (recommended - the full list can be long)
+wilma-cli recipients Smith
 ```
 
 Output example:
 ```
 Available Recipients:
 
-  [101] Smith John (Teacher)
-  [102] Johnson Anna (Teacher)
-  [200] Admin Office (Staff)
+  Smith John (Teacher)
+      id: r_personnel=101&n_schools=1
+  Johnson Anna (Teacher)
+      id: r_personnel=102&n_schools=1
 ```
+
+The `id` string is what you pass to `send`.
 
 ### Send a message
 
 ```bash
-wilma-cli send <recipient_id> <subject> <body>
-
-# Example:
-wilma-cli send 101 "Question about homework" "Could you clarify exercise 3?"
+wilma-cli send <recipient> <subject> <body>
 ```
 
-Use `wilma-cli recipients` first to find the recipient ID.
+`<recipient>` can be either a **name** or an **id** from `recipients`:
+
+```bash
+# By name (resolved automatically against the recipient list)
+wilma-cli send "Smith John" "Question about homework" "Could you clarify exercise 3?"
+
+# By id (unambiguous - use this if a name matches more than one person)
+wilma-cli send "r_personnel=101&n_schools=1" "Question about homework" "Could you clarify exercise 3?"
+```
+
+If a name is ambiguous, the command lists the matches so you can pick a specific id. Tip: run `wilma-cli recipients <name>` first when unsure.
 
 ### Reply to a message
 
@@ -183,6 +199,6 @@ This project also provides an MCP server for direct integration with Claude Code
 
 - **Read/unread status**: Messages show as `(READ)` or `(UNREAD)` in `messages`. Viewing a message with `message <id>` automatically marks it as read. Wilma does not support marking messages as unread.
 - Use `reply` to reply to existing messages - it handles recipients automatically.
-- Use `recipients` before `send` when composing new messages.
+- `send` accepts a recipient **name** or an **id** from `recipients`. Passing a name is convenient; passing an id is unambiguous. If a name matches more than one person, `send` lists the matches instead of guessing.
 - Wilma has no official API; this uses reverse-engineered web endpoints that may change.
 - Supports Finnish language date inputs: "tänään", "huomenna", "maanantai", etc.
