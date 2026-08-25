@@ -864,9 +864,15 @@ class WilmaClient:
     async def reply_to_message(self, message_id: str, body: str) -> bool:
         """Reply to a message by ID.
 
-        Fetches the original message page to find the actual reply link, then
-        follows it to get the reply compose form with pre-filled recipient and
-        subject. This avoids having to look up recipient ids separately.
+        Handles both kinds of thread Wilma serves:
+
+        * **Open / collated threads** (the teacher ticked "avoin keskustelu", so
+          every recipient sees every answer). These carry an inline quick-reply
+          form posting to ``/messages/collatedreply/<id>``; the reply becomes a
+          comment on the shared thread. Preferred when present, because it is
+          what the sender asked for by opening the discussion.
+        * **Ordinary messages**, which link to a compose form with the recipient
+          and subject pre-filled. The reply goes to the sender alone.
 
         Args:
             message_id: ID of the message to reply to
@@ -880,22 +886,39 @@ class WilmaClient:
         """
         from bs4 import BeautifulSoup
 
-        # Step 1: Fetch the original message page to find the reply link.
+        # Step 1: Fetch the original message page to find the reply route.
         msg_response = await self._request("GET", f"/messages/{message_id}")
         msg_soup = BeautifulSoup(msg_response.text, "html.parser")
 
-        # Find the reply link - Wilma uses "Vastaa" (Reply) button.
-        reply_link = msg_soup.find("a", string=re.compile(r"Vastaa", re.I))
+        # Step 2: An open discussion thread answers via its quick-reply form.
+        quickreply = msg_soup.find("form", id="quickreply-form")
+        if quickreply and quickreply.get("action"):
+            data = {
+                inp["name"]: inp.get("value") or ""
+                for inp in quickreply.find_all("input")
+                if inp.get("name")
+            }
+            data["bodytext"] = body
+            await self._request("POST", quickreply["action"], data=data)
+            return True
+
+        # Step 3: Otherwise fall back to the separate-message compose form.
+        # Skip in-page anchors (e.g. "#quickreply"), which are not fetchable.
+        reply_link = None
+        for candidate in msg_soup.find_all("a", string=re.compile(r"Vastaa", re.I)):
+            href = candidate.get("href") or ""
+            if href and not href.startswith("#"):
+                reply_link = candidate
+                break
         if not reply_link:
             reply_link = msg_soup.find(
-                "a", href=re.compile(r"compose.*(?:answer|reply)", re.I)
+                "a", href=re.compile(r"compose.*(?:answer|reply|replyid)", re.I)
             )
         if not reply_link or not reply_link.get("href"):
             raise WilmaAPIError(
                 f"Could not find reply link on message {message_id}"
             )
 
-        # Step 2: Follow the reply link to get the compose form, then submit it.
         # Subject is left as None so Wilma's pre-filled "VS:" subject is kept.
         compose_response = await self._request("GET", reply_link["href"])
         return await self._submit_compose_form(
