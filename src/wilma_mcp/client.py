@@ -12,6 +12,7 @@ from .models import (
     DaySchedule,
     Lesson,
     Message,
+    MessageReply,
     MessageSummary,
     Recipient,
 )
@@ -458,6 +459,14 @@ class WilmaClient:
 
             # Status field: truthy (e.g. 1) = unread/new, falsy/missing = read
             # Wilma's frontend uses Status to show bold "Uusi" (New) badge
+            # "Replies" is why a message you sent can resurface in the inbox:
+            # the row keeps its original Sender but takes the timestamp of the
+            # newest reply. Without the count that reads as a pointless echo.
+            try:
+                reply_count = int(msg.get("Replies") or 0)
+            except (TypeError, ValueError):
+                reply_count = 0
+
             message = MessageSummary(
                 id=str(msg.get("Id", "")),
                 subject=msg.get("Subject", ""),
@@ -465,6 +474,7 @@ class WilmaClient:
                 timestamp=timestamp,
                 is_read=not msg.get("Status"),
                 folder=msg.get("Folder", folder),
+                reply_count=reply_count,
             )
             messages.append(message)
 
@@ -535,7 +545,8 @@ class WilmaClient:
             timestamp = datetime(year, month, day, hour, minute)
 
         # Body lives in the CKEditor content container; join its lines so
-        # paragraph breaks are preserved.
+        # paragraph breaks are preserved. Only the *first* one is the message
+        # itself - see _parse_replies for the answers that follow it.
         content = ""
         body_el = soup.find("div", class_="ckeditor")
         if body_el:
@@ -562,7 +573,87 @@ class WilmaClient:
             content=content,
             recipients=recipients,
             is_read=True,
+            replies=self._parse_replies(soup),
         )
+
+    @staticmethod
+    def _parse_replies(soup: Any) -> list[MessageReply]:
+        """Extract the replies posted on a message thread.
+
+        Wilma renders every answer - both a reply to an ordinary message and a
+        comment on an open discussion thread - as::
+
+            <div class="m-replybox ...">
+              <h2><a class="profile-link">Kivi Pilvi (PK)</a> vastasi tänään klo 18:50</h2>
+              <div class="inner ...">...body...</div>
+            </div>
+
+        The ``hidden`` class on those elements is for Wilma's own progressive
+        rendering; the content is fully present in the server response.
+
+        Missing these is how a thread you opened yourself looks like a pointless
+        echo of your own message when it is really an unread answer.
+        """
+        replies: list[MessageReply] = []
+
+        for box in soup.find_all("div", class_="m-replybox"):
+            header_el = box.find("h2")
+            header = header_el.get_text(" ", strip=True) if header_el else ""
+
+            # "Sinä vastasit …" marks the account owner's own contributions;
+            # everyone else is named, usually via a profile link.
+            is_own = bool(re.match(r"\s*sinä\s+vastasit", header, re.I))
+            link = header_el.find("a", class_="profile-link") if header_el else None
+            if link:
+                reply_sender = link.get_text(" ", strip=True)
+            else:
+                reply_sender = re.split(r"\bvastasi(?:t)?\b", header, maxsplit=1)[0].strip()
+
+            # Timestamps come either absolute ("18.08.2026  16:27") or relative
+            # ("tänään klo 18:50"). Keep Wilma's wording and resolve when we can.
+            timestamp_text = ""
+            after = re.split(r"\bvastasi(?:t)?\b", header, maxsplit=1)
+            if len(after) > 1:
+                timestamp_text = after[1].strip()
+
+            timestamp = None
+            abs_match = re.search(
+                r"(\d{1,2})\.(\d{1,2})\.(\d{4})\s*(?:klo\s*)?(\d{1,2})[.:](\d{2})",
+                timestamp_text,
+            )
+            rel_match = re.search(
+                r"(tänään|eilen)\s*(?:klo\s*)?(\d{1,2})[.:](\d{2})", timestamp_text, re.I
+            )
+            if abs_match:
+                day, month, year = (int(abs_match.group(i)) for i in (1, 2, 3))
+                timestamp = datetime(
+                    year, month, day, int(abs_match.group(4)), int(abs_match.group(5))
+                )
+            elif rel_match:
+                base = datetime.now()
+                if rel_match.group(1).casefold() == "eilen":
+                    base -= timedelta(days=1)
+                timestamp = base.replace(
+                    hour=int(rel_match.group(2)),
+                    minute=int(rel_match.group(3)),
+                    second=0,
+                    microsecond=0,
+                )
+
+            inner = box.find("div", class_="inner")
+            body = "\n".join(inner.stripped_strings).strip() if inner else ""
+
+            replies.append(
+                MessageReply(
+                    sender=reply_sender,
+                    content=body,
+                    timestamp=timestamp,
+                    timestamp_text=timestamp_text,
+                    is_own=is_own,
+                )
+            )
+
+        return replies
 
     async def mark_message_read(self, message_id: str) -> bool:
         """Mark a message as read by viewing it.

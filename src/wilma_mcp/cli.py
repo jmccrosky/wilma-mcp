@@ -179,7 +179,12 @@ async def cmd_messages(args):
         for msg in messages:
             status = "READ" if msg.is_read else "UNREAD"
             print(f"[{msg.id}] ({status}) {msg.subject}")
-            print(f"   {direction}: {msg.sender} | {msg.timestamp.strftime('%Y-%m-%d %H:%M')}")
+            line = f"   {direction}: {msg.sender} | {msg.timestamp.strftime('%Y-%m-%d %H:%M')}"
+            if msg.reply_count:
+                plural = "replies" if msg.reply_count > 1 else "reply"
+                # The timestamp above is the newest reply's, not the original's.
+                line += f" | {msg.reply_count} {plural} (latest activity)"
+            print(line)
             print()
     finally:
         await client.close()
@@ -200,10 +205,24 @@ async def cmd_message(args):
             print(f"To: {', '.join(msg.recipients)}")
         if msg.attachments:
             print(f"Attachments: {', '.join(msg.attachments)}")
+        if msg.replies:
+            plural = "replies" if len(msg.replies) > 1 else "reply"
+            print(f"Replies: {len(msg.replies)} {plural}")
         print()
         print("---")
         print()
         print(msg.content)
+        for reply in msg.replies:
+            print()
+            print("---")
+            print()
+            who = "You" if reply.is_own else reply.sender
+            when = reply.timestamp_text or (
+                reply.timestamp.strftime("%Y-%m-%d %H:%M") if reply.timestamp else ""
+            )
+            print(f"REPLY - {who} | {when}".rstrip(" |"))
+            print()
+            print(reply.content)
     finally:
         await client.close()
 
