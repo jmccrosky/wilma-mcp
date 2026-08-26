@@ -69,10 +69,15 @@ def _format_message_summary(msg: MessageSummary) -> str:
     read_status = "📖" if msg.is_read else "📬"
     # In sent/drafts folders msg.sender holds the recipient(s).
     direction = "To" if msg.folder in ("sent", "outbox", "drafts") else "From"
-    return (
+    line = (
         f"{read_status} [{msg.id}] {msg.subject}\n"
         f"   {direction}: {msg.sender} | {msg.timestamp.strftime('%Y-%m-%d %H:%M')}"
     )
+    if msg.reply_count:
+        plural = "replies" if msg.reply_count > 1 else "reply"
+        # The timestamp above is the newest reply's, not the original's.
+        line += f" | 💬 {msg.reply_count} {plural} (latest activity)"
+    return line
 
 
 def _format_message(msg: Message) -> str:
@@ -86,7 +91,16 @@ def _format_message(msg: Message) -> str:
         lines.append(f"To: {', '.join(msg.recipients)}")
     if msg.attachments:
         lines.append(f"Attachments: {', '.join(msg.attachments)}")
+    if msg.replies:
+        plural = "replies" if len(msg.replies) > 1 else "reply"
+        lines.append(f"Replies: {len(msg.replies)} {plural}")
     lines.extend(["", "---", "", msg.content])
+    for reply in msg.replies:
+        who = "You" if reply.is_own else reply.sender
+        when = reply.timestamp_text or (
+            reply.timestamp.strftime("%Y-%m-%d %H:%M") if reply.timestamp else ""
+        )
+        lines.extend(["", "---", "", f"REPLY — {who} | {when}".rstrip(" |"), "", reply.content])
     return "\n".join(lines)
 
 

@@ -410,3 +410,95 @@ def test_parse_message_extracts_metadata_and_clean_body():
 
     # "Piilotettu" (hidden) recipients are dropped rather than shown literally.
     assert msg.recipients == []
+
+
+# --------------------------------------------------------------------------- #
+# Thread replies
+# --------------------------------------------------------------------------- #
+
+# Markup copied from a real Wilma message view. Two things matter here: the
+# reply body sits in a *second* container (the first ``div.ckeditor`` is the
+# original message), and both elements carry a ``hidden`` class that Wilma's own
+# scripts strip on render - the content is fully present server-side.
+THREAD_HTML = """
+<html><head><title>Daniela: uinti väliin - Wilma</title></head><body>
+<table>
+  <tr><th>Lähettäjä: </th><td>McCrosky Jesse (Daniela McCrosky Galiana, 3 C)</td></tr>
+  <tr><th>Lähetetty: </th><td>25.8.2026 klo 18:17<br></td></tr>
+  <tr><th>Vastauksia: </th><td>2 vastausta</td></tr>
+</table>
+<div class="ckeditor hidden">Hei Pilvi,
+
+Daniela j&auml;tt&auml;&auml; huomisen uinnin v&auml;liin.</div>
+<div class="m-replybox hidden col-lg-10">
+    <h2><a href="/profiles/teachers/242" class="ope profile-link">Kivi Pilvi (PK)</a>&nbsp; vastasi tänään klo 18:50<a name="lastreply"></a></h2>
+    <div class="inner hidden"><p>Kiitos viestist&auml;. T&auml;m&auml; sopii hyvin.</p><p>-Pilvi</p></div>
+</div>
+<div class="m-replybox hidden col-lg-10">
+    <h2>Sinä vastasit 18.08.2026  16:58</h2>
+    <div class="inner hidden"><p>Kiitos!</p></div>
+</div>
+</body></html>
+"""
+
+
+def test_parse_message_reads_thread_replies():
+    client = make_client()
+    msg = client._parse_message_from_html(THREAD_HTML, "428949")
+
+    # The original body is still just the first ckeditor block...
+    assert msg.content.startswith("Hei Pilvi,")
+    assert "Kiitos viestistä" not in msg.content
+
+    # ...and the answers come back separately, in order.
+    assert len(msg.replies) == 2
+    first, second = msg.replies
+
+    assert first.sender == "Kivi Pilvi (PK)"
+    assert first.content == "Kiitos viestistä. Tämä sopii hyvin.\n-Pilvi"
+    assert first.is_own is False
+    # Relative wording is preserved verbatim and resolved to a real time.
+    assert first.timestamp_text == "tänään klo 18:50"
+    assert (first.timestamp.hour, first.timestamp.minute) == (18, 50)
+
+    # "Sinä vastasit" marks the account owner's own contribution.
+    assert second.is_own is True
+    assert second.content == "Kiitos!"
+    assert second.timestamp.year == 2026
+    assert (second.timestamp.month, second.timestamp.day) == (8, 18)
+
+
+def test_parse_message_without_replies_yields_empty_list():
+    client = make_client()
+    msg = client._parse_message_from_html(MESSAGE_HTML, "426418")
+    assert msg.replies == []
+
+
+def test_parse_replies_tolerates_malformed_box():
+    """A replybox missing its header/body must not blow up the whole message."""
+    from bs4 import BeautifulSoup
+
+    replies = WilmaClient._parse_replies(
+        BeautifulSoup('<div class="m-replybox"></div>', "html.parser")
+    )
+    assert len(replies) == 1
+    assert replies[0].sender == "" and replies[0].content == ""
+
+
+def test_parse_messages_json_exposes_reply_count():
+    """A thread you opened resurfaces in the inbox when someone answers it.
+
+    The row keeps the original Sender but takes the newest reply's timestamp,
+    so without the count it is indistinguishable from an echo of your own mail.
+    """
+    client = make_client()
+    data = {"Messages": [
+        {"Id": 428949, "Subject": "Daniela: uinti väliin",
+         "Sender": "McCrosky Jesse (Daniela McCrosky Galiana, 3 C)",
+         "TimeStamp": "2026-08-25 18:50", "Replies": 1},
+        {"Id": 428924, "Subject": "Retki lähestyy", "Sender": "Kivi Pilvi (PK)",
+         "TimeStamp": "2026-08-25 15:33"},
+    ]}
+    msgs = client._parse_messages_json(data, "inbox", 20)
+    assert msgs[0].reply_count == 1
+    assert msgs[1].reply_count == 0  # absent field => 0, not a crash

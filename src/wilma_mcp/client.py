@@ -12,6 +12,7 @@ from .models import (
     DaySchedule,
     Lesson,
     Message,
+    MessageReply,
     MessageSummary,
     Recipient,
 )
@@ -458,6 +459,14 @@ class WilmaClient:
 
             # Status field: truthy (e.g. 1) = unread/new, falsy/missing = read
             # Wilma's frontend uses Status to show bold "Uusi" (New) badge
+            # "Replies" is why a message you sent can resurface in the inbox:
+            # the row keeps its original Sender but takes the timestamp of the
+            # newest reply. Without the count that reads as a pointless echo.
+            try:
+                reply_count = int(msg.get("Replies") or 0)
+            except (TypeError, ValueError):
+                reply_count = 0
+
             message = MessageSummary(
                 id=str(msg.get("Id", "")),
                 subject=msg.get("Subject", ""),
@@ -465,6 +474,7 @@ class WilmaClient:
                 timestamp=timestamp,
                 is_read=not msg.get("Status"),
                 folder=msg.get("Folder", folder),
+                reply_count=reply_count,
             )
             messages.append(message)
 
@@ -535,7 +545,8 @@ class WilmaClient:
             timestamp = datetime(year, month, day, hour, minute)
 
         # Body lives in the CKEditor content container; join its lines so
-        # paragraph breaks are preserved.
+        # paragraph breaks are preserved. Only the *first* one is the message
+        # itself - see _parse_replies for the answers that follow it.
         content = ""
         body_el = soup.find("div", class_="ckeditor")
         if body_el:
@@ -562,7 +573,87 @@ class WilmaClient:
             content=content,
             recipients=recipients,
             is_read=True,
+            replies=self._parse_replies(soup),
         )
+
+    @staticmethod
+    def _parse_replies(soup: Any) -> list[MessageReply]:
+        """Extract the replies posted on a message thread.
+
+        Wilma renders every answer - both a reply to an ordinary message and a
+        comment on an open discussion thread - as::
+
+            <div class="m-replybox ...">
+              <h2><a class="profile-link">Kivi Pilvi (PK)</a> vastasi tänään klo 18:50</h2>
+              <div class="inner ...">...body...</div>
+            </div>
+
+        The ``hidden`` class on those elements is for Wilma's own progressive
+        rendering; the content is fully present in the server response.
+
+        Missing these is how a thread you opened yourself looks like a pointless
+        echo of your own message when it is really an unread answer.
+        """
+        replies: list[MessageReply] = []
+
+        for box in soup.find_all("div", class_="m-replybox"):
+            header_el = box.find("h2")
+            header = header_el.get_text(" ", strip=True) if header_el else ""
+
+            # "Sinä vastasit …" marks the account owner's own contributions;
+            # everyone else is named, usually via a profile link.
+            is_own = bool(re.match(r"\s*sinä\s+vastasit", header, re.I))
+            link = header_el.find("a", class_="profile-link") if header_el else None
+            if link:
+                reply_sender = link.get_text(" ", strip=True)
+            else:
+                reply_sender = re.split(r"\bvastasi(?:t)?\b", header, maxsplit=1)[0].strip()
+
+            # Timestamps come either absolute ("18.08.2026  16:27") or relative
+            # ("tänään klo 18:50"). Keep Wilma's wording and resolve when we can.
+            timestamp_text = ""
+            after = re.split(r"\bvastasi(?:t)?\b", header, maxsplit=1)
+            if len(after) > 1:
+                timestamp_text = after[1].strip()
+
+            timestamp = None
+            abs_match = re.search(
+                r"(\d{1,2})\.(\d{1,2})\.(\d{4})\s*(?:klo\s*)?(\d{1,2})[.:](\d{2})",
+                timestamp_text,
+            )
+            rel_match = re.search(
+                r"(tänään|eilen)\s*(?:klo\s*)?(\d{1,2})[.:](\d{2})", timestamp_text, re.I
+            )
+            if abs_match:
+                day, month, year = (int(abs_match.group(i)) for i in (1, 2, 3))
+                timestamp = datetime(
+                    year, month, day, int(abs_match.group(4)), int(abs_match.group(5))
+                )
+            elif rel_match:
+                base = datetime.now()
+                if rel_match.group(1).casefold() == "eilen":
+                    base -= timedelta(days=1)
+                timestamp = base.replace(
+                    hour=int(rel_match.group(2)),
+                    minute=int(rel_match.group(3)),
+                    second=0,
+                    microsecond=0,
+                )
+
+            inner = box.find("div", class_="inner")
+            body = "\n".join(inner.stripped_strings).strip() if inner else ""
+
+            replies.append(
+                MessageReply(
+                    sender=reply_sender,
+                    content=body,
+                    timestamp=timestamp,
+                    timestamp_text=timestamp_text,
+                    is_own=is_own,
+                )
+            )
+
+        return replies
 
     async def mark_message_read(self, message_id: str) -> bool:
         """Mark a message as read by viewing it.
@@ -864,9 +955,15 @@ class WilmaClient:
     async def reply_to_message(self, message_id: str, body: str) -> bool:
         """Reply to a message by ID.
 
-        Fetches the original message page to find the actual reply link, then
-        follows it to get the reply compose form with pre-filled recipient and
-        subject. This avoids having to look up recipient ids separately.
+        Handles both kinds of thread Wilma serves:
+
+        * **Open / collated threads** (the teacher ticked "avoin keskustelu", so
+          every recipient sees every answer). These carry an inline quick-reply
+          form posting to ``/messages/collatedreply/<id>``; the reply becomes a
+          comment on the shared thread. Preferred when present, because it is
+          what the sender asked for by opening the discussion.
+        * **Ordinary messages**, which link to a compose form with the recipient
+          and subject pre-filled. The reply goes to the sender alone.
 
         Args:
             message_id: ID of the message to reply to
@@ -880,22 +977,39 @@ class WilmaClient:
         """
         from bs4 import BeautifulSoup
 
-        # Step 1: Fetch the original message page to find the reply link.
+        # Step 1: Fetch the original message page to find the reply route.
         msg_response = await self._request("GET", f"/messages/{message_id}")
         msg_soup = BeautifulSoup(msg_response.text, "html.parser")
 
-        # Find the reply link - Wilma uses "Vastaa" (Reply) button.
-        reply_link = msg_soup.find("a", string=re.compile(r"Vastaa", re.I))
+        # Step 2: An open discussion thread answers via its quick-reply form.
+        quickreply = msg_soup.find("form", id="quickreply-form")
+        if quickreply and quickreply.get("action"):
+            data = {
+                inp["name"]: inp.get("value") or ""
+                for inp in quickreply.find_all("input")
+                if inp.get("name")
+            }
+            data["bodytext"] = body
+            await self._request("POST", quickreply["action"], data=data)
+            return True
+
+        # Step 3: Otherwise fall back to the separate-message compose form.
+        # Skip in-page anchors (e.g. "#quickreply"), which are not fetchable.
+        reply_link = None
+        for candidate in msg_soup.find_all("a", string=re.compile(r"Vastaa", re.I)):
+            href = candidate.get("href") or ""
+            if href and not href.startswith("#"):
+                reply_link = candidate
+                break
         if not reply_link:
             reply_link = msg_soup.find(
-                "a", href=re.compile(r"compose.*(?:answer|reply)", re.I)
+                "a", href=re.compile(r"compose.*(?:answer|reply|replyid)", re.I)
             )
         if not reply_link or not reply_link.get("href"):
             raise WilmaAPIError(
                 f"Could not find reply link on message {message_id}"
             )
 
-        # Step 2: Follow the reply link to get the compose form, then submit it.
         # Subject is left as None so Wilma's pre-filled "VS:" subject is kept.
         compose_response = await self._request("GET", reply_link["href"])
         return await self._submit_compose_form(

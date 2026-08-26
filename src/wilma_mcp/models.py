@@ -46,6 +46,30 @@ class MessageSummary:
     timestamp: datetime
     is_read: bool = False
     folder: str = "inbox"
+    reply_count: int = 0
+    """Replies posted on the thread. ``sender`` is always the thread's *opener*
+    and ``timestamp`` its *latest activity*, so a message you sent yourself
+    reappears in the inbox when somebody answers it. A non-zero count is what
+    distinguishes that from a genuinely new message."""
+
+
+@dataclass
+class MessageReply:
+    """A single reply posted on a message thread.
+
+    Covers both flavours Wilma renders in ``div.m-replybox``: answers to an
+    ordinary one-to-one message, and comments on an open discussion thread
+    (*avoin keskustelu*), which every recipient can see and add to.
+    """
+
+    sender: str
+    content: str
+    timestamp: Optional[datetime] = None
+    timestamp_text: str = ""
+    """Wilma's own wording, kept verbatim because it is sometimes relative
+    ("tänään klo 18:50") and cannot always be resolved to an exact datetime."""
+    is_own: bool = False
+    """True when Wilma labelled it "Sinä vastasit" — i.e. the account owner."""
 
 
 @dataclass
@@ -62,6 +86,7 @@ class Message:
     is_read: bool = False
     folder: str = "inbox"
     reply_to_id: Optional[str] = None
+    replies: list["MessageReply"] = field(default_factory=list)
 
 
 @dataclass
